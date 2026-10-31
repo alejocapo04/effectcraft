@@ -51,7 +51,9 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         egui::MenuBar::new().config(egui::containers::menu::MenuConfig::new().style(crate::widgets::menu_style)).ui(ui, |ui| {
             for node in effectcraft_engine::menus::menu_bar() {
-                let MenuNode::Submenu { label, children } = node else { continue };
+                let MenuNode::Submenu { label, children } = node else {
+                    continue;
+                };
                 // The open title takes the open button's look while its menu is up (as in AE).
                 let inactive = ui.style().visuals.widgets.inactive;
                 if open_prev == Some(drawn) {
@@ -88,6 +90,9 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                     .open_memory(cmd)
                     .show(|ui| {
                         ui.set_min_width(if label == "Effect" { 200.0 } else { 280.0 });
+                        if label == "File" && app.hooks.file_providers.enabled() {
+                            ui.menu_button("Recent from provider", |ui| crate::provider_ui::recent(app, ui));
+                        }
                         let browsing = nav.browsing();
                         crate::widgets::menu_scroll(ui, browsing, |ui| menu_nodes(app, ui, children, &mut clicked, &mut nav, 0));
                     });
@@ -256,7 +261,9 @@ pub(crate) fn submenu_at(app: &mut EffectcraftApp, ui: &mut egui::Ui, path: &[&s
     let mut nodes = effectcraft_engine::menus::menu_bar();
     let mut found = None;
     for label in path {
-        let Some(n) = nodes.iter().find(|n| matches!(n, MenuNode::Submenu { label: l, .. } if l == label)) else { return };
+        let Some(n) = nodes.iter().find(|n| matches!(n, MenuNode::Submenu { label: l, .. } if l == label)) else {
+            return;
+        };
         if let MenuNode::Submenu { children, .. } = n {
             nodes = children;
         }

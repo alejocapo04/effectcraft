@@ -181,7 +181,9 @@ pub fn decode_thumb(text: &str) -> Option<egui::ColorImage> {
 /// saved revision, when the viewer shows that revision).
 pub fn capture_thumbnail(app: &mut EffectcraftApp) {
     let s = &app.session;
-    let (Some(path), Some(_)) = (s.path.clone(), s.config.as_ref()) else { return };
+    let (Some(path), Some(_)) = (s.path.clone(), s.config.as_ref()) else {
+        return;
+    };
     if s.is_dirty() {
         return;
     }
@@ -192,7 +194,9 @@ pub fn capture_thumbnail(app: &mut EffectcraftApp) {
     if app.viewer_shown.as_ref().map(|(_, k)| k.revision) != Some(s.revision) {
         return;
     }
-    let Some(img) = app.viewer_pixels() else { return };
+    let Some(img) = app.viewer_pixels() else {
+        return;
+    };
     let text = encode_thumb(&img);
     if let Some(c) = &app.session.config
         && let Err(e) = c.write(&thumb_name(&path), &text)
@@ -382,8 +386,21 @@ fn home_page(
     }
     y += 64.0 + 36.0;
 
+    if app.hooks.file_providers.enabled() {
+        let r = Rect::from_min_size(pos2(x0, y), vec2(w, 160.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+            egui::ScrollArea::vertical().id_salt("file-provider-home").max_height(150.0).show(ui, |ui| crate::provider_ui::recent(app, ui));
+        });
+        y += 170.0;
+    }
     // Recent: heading, filter, clear.
-    p.text(pos2(x0, y + 12.0), Align2::LEFT_CENTER, tr("Recent"), Tokens::semibold(17.0), t.tab_text_active);
+    p.text(
+        pos2(x0, y + 12.0),
+        Align2::LEFT_CENTER,
+        tr(if app.hooks.file_providers.enabled() { "Recent on this device" } else { "Recent" }),
+        Tokens::semibold(17.0),
+        t.tab_text_active,
+    );
     let entries = recent_entries(&app.session.prefs);
     let fid = egui::Id::unique("home-filter");
     let mut filter: String = ctx.data(|d| d.get_temp(fid)).unwrap_or_default();

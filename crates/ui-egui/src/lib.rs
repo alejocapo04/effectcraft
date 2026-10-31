@@ -240,7 +240,9 @@ impl Playback {
     pub fn keeps_up(&self, now: f64) -> bool {
         let step = self.plan.map_or(1, |p| p.step).max(1) as f64;
         let frame = step / self.fps.max(1.0);
-        let (Some(a), Some(b)) = (self.shown_at.front(), self.shown_at.back()) else { return false };
+        let (Some(a), Some(b)) = (self.shown_at.front(), self.shown_at.back()) else {
+            return false;
+        };
         self.shown_at.len() >= 3 && b - a >= (2.0 * frame).max(0.25) && now - b <= 2.0 * frame && self.real_time() == Some(true)
     }
 }
@@ -458,3 +460,8 @@ pub(crate) fn note_viewer_scale(app: &mut EffectcraftApp, scale: f64) {
 
 #[cfg(test)]
 mod lifecycle_tests;
+
+/// Optional file-provider capability; dormant until a trusted host registers one.
+pub mod file_providers;
+pub mod provider_bundle;
+pub mod provider_ui;

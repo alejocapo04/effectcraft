@@ -63,11 +63,21 @@ pub fn repaint() {
 
 /// Open a project or import media from table paths (picked or dropped files).
 pub(crate) fn open_or_import(app: &mut EffectcraftApp, paths: Vec<String>) {
-    let (projects, media): (Vec<String>, Vec<String>) = paths.into_iter().partition(|p| p.to_ascii_lowercase().ends_with(".ecproj"));
-    if let Some(p) = projects.last()
-        && let Err(e) = app.session.execute("file.open", json!({"path": p}))
-    {
-        app.ui.status = e.to_string();
+    if app.hooks.file_providers.busy() {
+        app.ui.status = "Finish or cancel the pending provider operation first".into();
+        return;
+    }
+    let (projects, media): (Vec<String>, Vec<String>) =
+        paths.into_iter().partition(|p| p.to_ascii_lowercase().ends_with(".ecproj") || p.to_ascii_lowercase().ends_with(".ecbundle"));
+    if let Some(p) = projects.last() {
+        let result = if p.to_ascii_lowercase().ends_with(".ecbundle") {
+            files::get(p).ok_or_else(|| "Missing bundle bytes".to_string()).and_then(|b| crate::provider_storage::open_device(app, &b))
+        } else {
+            app.session.execute("file.open", json!({"path":p})).map(|_| ()).map_err(|e| e.to_string())
+        };
+        if let Err(error) = result {
+            app.ui.status = error;
+        }
     }
     if !media.is_empty() {
         match app.session.execute("file.import", json!({"paths": media})) {
@@ -84,6 +94,7 @@ pub(crate) fn open_or_import(app: &mut EffectcraftApp, paths: Vec<String>) {
 /// The eframe app: the shared EffectCraft UI plus the browser host's per-frame duties.
 pub struct WebApp {
     pub app: EffectcraftApp,
+    pub providers: crate::provider_storage::Runtime,
     /// Keep the session snapshot (off with `?empty`; off with an explicit `"demo"` startup until
     /// the user's own work begins, see `demo_start`).
     pub persist: bool,
@@ -121,6 +132,7 @@ impl eframe::App for WebApp {
             f(&mut self.app);
         }
         self.app.tick(ctx, frame);
+        self.providers.tick(&mut self.app);
         // eframe on the web ignores `ViewportCommand::Title`: the tab title follows the open document here.
         if self.app.window_title() != self.document_title {
             self.document_title = self.app.window_title().to_owned();
@@ -208,7 +220,7 @@ fn install_hooks(app: &mut EffectcraftApp) {
         Vec::new()
     }));
     app.hooks.pick_open_project = Some(Box::new(|| {
-        if let Err(e) = files::pick(".ecproj", false, |paths| post(move |app| open_or_import(app, paths))) {
+        if let Err(e) = files::pick(".ecproj,.ecbundle", false, |paths| post(move |app| open_or_import(app, paths))) {
             log::warn!("file picker: {e:?}");
         }
         None
@@ -306,6 +318,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                     app.offer_recovery(r);
                 }
                 install_hooks(&mut app);
+                crate::file_providers::install(app.hooks.file_providers.clone(), cc.egui_ctx.clone()).map_err(|e| format!("file providers: {e:?}"))?;
                 // Viewer frames render in frame workers (`?frameworkers=N`, 0 or `?noworkers`:
                 // on the page's thread), each on its own WebGPU device where the browser has
                 // WebGPU in workers (`?nogpuworkers`: their CPU).
@@ -319,7 +332,13 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 app = app.with_control(rx);
                 let backend = cc.wgpu_render_state.as_ref().map(|rs| format!("{:?}", rs.adapter.get_info().backend));
                 api::set_info("backend", json!(backend));
-                Ok(Box::new(WebApp { app, persist: keep_session, demo_start: !empty && !keep_session, document_title: String::new() }))
+                Ok(Box::new(WebApp {
+                    app,
+                    providers: Default::default(),
+                    persist: keep_session,
+                    demo_start: !empty && !keep_session,
+                    document_title: String::new(),
+                }))
             }),
         )
         .await?;

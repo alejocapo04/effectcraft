@@ -166,7 +166,9 @@ impl Session {
     /// on-canvas editor gets a new IME epoch only when its own document changed) and the session is
     /// bumped. Returns `false`, changing nothing, when there is nothing to undo.
     pub fn undo(&mut self) -> bool {
-        let Some((label, p)) = self.history.undo.pop() else { return false };
+        let Some((label, p)) = self.history.undo.pop() else {
+            return false;
+        };
         let edited = commands::text_edit::active_editor_snapshot(self);
         let probe = commands::kept_crypto_probe(self);
         let cur = std::mem::replace(&mut self.project, p);
@@ -184,7 +186,9 @@ impl Session {
     /// text document starts a new IME epoch) and the session is bumped. Returns `false`, changing
     /// nothing, when there is nothing to redo.
     pub fn redo(&mut self) -> bool {
-        let Some((label, p)) = self.history.redo.pop() else { return false };
+        let Some((label, p)) = self.history.redo.pop() else {
+            return false;
+        };
         let edited = commands::text_edit::active_editor_snapshot(self);
         let probe = commands::kept_crypto_probe(self);
         let cur = std::mem::replace(&mut self.project, p);
@@ -205,6 +209,13 @@ impl Session {
     pub fn mark_saved(&mut self) {
         self.saved_project = self.project.clone();
         self.saved_revision = self.revision;
+    }
+
+    /// A trusted external provider durably stored this exact captured checkpoint.
+    /// Later edits remain dirty; callers must reject acknowledgements for replaced documents.
+    pub fn acknowledge_external_save(&mut self, project: Arc<Project>, revision: u64) {
+        self.saved_project = project;
+        self.saved_revision = revision;
     }
 
     /// The project has changes its file doesn't (a session restored with unsaved changes): it
@@ -282,7 +293,9 @@ pub fn upgrade_effects(p: &mut Project) {
     }
     let mut next = p.next_id;
     for (cid, it) in p.items.iter_mut() {
-        let effectcraft_project::ItemKind::Comp(c) = &mut it.kind else { continue };
+        let effectcraft_project::ItemKind::Comp(c) = &mut it.kind else {
+            continue;
+        };
         for l in &mut std::sync::Arc::make_mut(c).layers {
             let (size, origin) = bounds.get(&(*cid, l.id)).copied().unwrap_or(([100.0, 100.0], [0.0; 2]));
             // Effect space starts at the bounds' top-left: positions move by minus that corner.
@@ -296,10 +309,16 @@ pub fn upgrade_effects(p: &mut Project) {
             if let Some(contents) = l.props.sub_mut("contents") {
                 effectcraft_project::build::upgrade_shape_contents(&mut effectcraft_project::build::Ids(&mut next), contents);
             }
-            let Some(fx) = l.props.sub_mut("effects") else { continue };
+            let Some(fx) = l.props.sub_mut("effects") else {
+                continue;
+            };
             for n in &mut fx.children {
-                let effectcraft_project::Node::Group(g) = n else { continue };
-                let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { continue };
+                let effectcraft_project::Node::Group(g) = n else {
+                    continue;
+                };
+                let effectcraft_project::GroupKind::Effect { effect } = &g.kind else {
+                    continue;
+                };
                 if let Some(spec) = effectcraft_effects::find(effect) {
                     effectcraft_effects::migrate::upgrade_instance(spec, g, &mut effectcraft_project::build::Ids(&mut next), size);
                     if to_effect_space {
@@ -311,4 +330,22 @@ pub fn upgrade_effects(p: &mut Project) {
     }
     p.next_id = next;
     p.schema = effectcraft_project::SCHEMA_VERSION;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod provider_checkpoint_tests {
+    use super::*;
+    #[test]
+    fn delayed_provider_checkpoint_does_not_acknowledge_later_edits() {
+        let mut session = Session::default();
+        let saved = session.project.clone();
+        let revision = session.revision;
+        session.mark_unsaved();
+        session.acknowledge_external_save(saved, revision);
+        assert!(session.is_dirty());
+        let current = session.project.clone();
+        session.acknowledge_external_save(current, session.revision);
+        assert!(!session.is_dirty());
+    }
 }

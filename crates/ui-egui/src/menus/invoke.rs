@@ -68,7 +68,9 @@ fn reveal_time_remap(app: &mut EffectcraftApp, params: &Value) {
         Some(a) => a.iter().filter_map(Value::as_u64).collect(),
         None => app.session.state.selected_layers.iter().map(|l| l.0).collect(),
     };
-    let Some(comp) = app.session.active_comp() else { return };
+    let Some(comp) = app.session.active_comp() else {
+        return;
+    };
     let layers: Vec<u64> = comp.layers.iter().filter(|l| asked.contains(&l.id.0) && l.props.get("timeRemap").is_some()).map(|l| l.id.0).collect();
     if !layers.is_empty() {
         app.ui.timeline.apply_reveal(&layers, vec!["timeRemap".into()]);
@@ -80,7 +82,9 @@ fn reveal_time_remap(app: &mut EffectcraftApp, params: &Value) {
 /// open, else alone like P.
 fn reveal_keyed(app: &mut EffectcraftApp, keyed: &Value, kind: &str) {
     let layers: std::collections::BTreeSet<u64> = keyed.as_array().into_iter().flatten().filter_map(|k| k.get("layer").and_then(Value::as_u64)).collect();
-    let Some(comp) = app.session.active_comp() else { return };
+    let Some(comp) = app.session.active_comp() else {
+        return;
+    };
     let tl = &mut app.ui.timeline;
     for id in layers {
         let shown = tl.layer_reveal.get(&id).filter(|k| !k.is_empty()).cloned();
@@ -152,7 +156,9 @@ fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Val
 fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerId, d: [f64; 2]) -> [f64; 2] {
     use effectcraft_engine::geom::vec2;
     let s = &app.session;
-    let (Some(cid), Some(comp)) = (s.active_comp_id(), s.active_comp()) else { return d };
+    let (Some(cid), Some(comp)) = (s.active_comp_id(), s.active_comp()) else {
+        return d;
+    };
     let Some(l) = comp.layer(layer) else { return d };
     let ectx = effectcraft_engine::render::EvalCtx {
         project: &s.project,
@@ -184,6 +190,9 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if let Some(result) = crate::provider_ui::choose(app, id) {
+        return result;
+    }
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -219,7 +228,9 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
                     .collect();
                 return run_engine(app, ctx, "project.select", json!({"items":items}));
             }
-            "edit.deselectAll" => return run_engine(app, ctx, "project.select", json!({"items":[]})),
+            "edit.deselectAll" => {
+                return run_engine(app, ctx, "project.select", json!({"items":[]}));
+            }
             "edit.cut" | "edit.copy" | "edit.paste" | "edit.copyWithPropertyLinks" | "edit.copyWithRelativePropertyLinks" | "edit.copyExpressionOnly" => {
                 return Err("Project clipboard actions are not supported yet".into());
             }
@@ -520,7 +531,9 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         // Shift+, / Shift+.: the previous / next open composition (the viewer's tabs).
         "view.nextItem" | "view.previousItem" => {
             let open = app.session.state.open_comps.clone();
-            let Some(i) = app.session.state.active_comp.and_then(|c| open.iter().position(|o| *o == c)) else { return Ok(Value::Null) };
+            let Some(i) = app.session.state.active_comp.and_then(|c| open.iter().position(|o| *o == c)) else {
+                return Ok(Value::Null);
+            };
             let step = if id == "view.nextItem" { 1 } else { open.len().saturating_sub(1) };
             let Some(next) = open.get((i + step) % open.len().max(1)).copied().filter(|n| Some(*n) != app.session.state.active_comp) else {
                 return Ok(Value::Null);
@@ -537,7 +550,9 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         "window.nextPanel" | "window.previousPanel" => {
             let focused = app.ui.focused;
             let group = app.ui.dock.group_of(focused);
-            let Some(i) = group.iter().position(|p| *p == focused) else { return Ok(Value::Null) };
+            let Some(i) = group.iter().position(|p| *p == focused) else {
+                return Ok(Value::Null);
+            };
             let step = if id == "window.nextPanel" { 1 } else { group.len().saturating_sub(1) };
             if let Some(next) = group.get((i + step) % group.len().max(1)).copied() {
                 app.show_panel(next);
@@ -599,7 +614,9 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             tl.source_name = params.get("value").and_then(Value::as_bool).unwrap_or(!tl.source_name);
             return Ok(json!({"sourceName": tl.source_name}));
         }
-        "flowchart.options" | "flowchart.graph" => return crate::panels::flowchart::command(app, id, &params),
+        "flowchart.options" | "flowchart.graph" => {
+            return crate::panels::flowchart::command(app, id, &params);
+        }
         "timeline.search" => {
             app.ui.timeline.search = params.get("query").and_then(Value::as_str).unwrap_or_default().to_string();
             app.show_panel(PanelKind::Timeline);
@@ -630,8 +647,12 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
                 tl.open_layers.extend(sel);
             }
         }
-        "timeline.workAreaBegin" => return app.session.execute("comp.workArea", json!({"set": "begin"})).map_err(|e| e.to_string()),
-        "timeline.workAreaEnd" => return app.session.execute("comp.workArea", json!({"set": "end"})).map_err(|e| e.to_string()),
+        "timeline.workAreaBegin" => {
+            return app.session.execute("comp.workArea", json!({"set": "begin"})).map_err(|e| e.to_string());
+        }
+        "timeline.workAreaEnd" => {
+            return app.session.execute("comp.workArea", json!({"set": "end"})).map_err(|e| e.to_string());
+        }
         "timeline.moveInToTime" => return timing(app, "moveInToTime"),
         "timeline.moveOutToTime" => return timing(app, "moveOutToTime"),
         "timeline.trimInToTime" => return timing(app, "trimInToTime"),

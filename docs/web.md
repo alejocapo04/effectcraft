@@ -508,3 +508,9 @@ layer buffers through the disk store and the prefetch plan (`remote.rs`
 - A layer buffer is fetched from disk only after some worker missed it in a recent frame (the
   first frame after a reload renders its layers).
 - Cancelling an analysis drops its partial result (the worker is terminated).
+
+## Optional external file providers
+
+A trusted same-origin host can explicitly register an account-scoped file provider for Save/Save As
+and a separate native Recent section. The feature is disabled by default; ordinary browser
+downloads and desktop/CLI saving are unchanged. See the [protocol and media-bundle contract](../packaging/web/file-providers.md).

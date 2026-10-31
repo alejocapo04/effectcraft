@@ -32,6 +32,9 @@ pub type DialogDone = Box<dyn FnOnce(Vec<String>) + Send>;
 /// Host hooks provided by the native app (file pickers etc.).
 #[derive(Default)]
 pub struct Hooks {
+    /// Optional web file capability, disabled by default.
+    pub file_providers: crate::file_providers::Host,
+
     /// The system appearance for Settings ▸ Appearance ▸ Sync with System (the desktop app reads
     /// the Linux desktop portal); without it, what egui reports.
     pub system_theme: Option<SystemThemeFn>,
