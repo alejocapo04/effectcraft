@@ -31,7 +31,9 @@ pub fn choose(app: &mut EffectcraftApp, id: &str) -> Option<Result<Value, String
 /// Provider reads may finish after a dialog or gesture starts. Refuse before decoding/staging,
 /// preserving the old project's dialog checkpoints and account/resource identity.
 pub fn check_open(app: &EffectcraftApp, ctx: Option<&egui::Context>) -> Result<(), String> {
-    let draft = app.dialog.is_some()
+    // Inline text and numeric editors can retain a draft on an event-empty delivery frame.
+    let draft = ctx.is_some_and(|ctx| ctx.text_edit_focused())
+        || app.dialog.is_some()
         || app.file_dialogs.count > 0
         || crate::panels::live_preview::active(app)
         || app.session.state.text_edit.is_some()
@@ -49,8 +51,9 @@ pub fn check_open(app: &EffectcraftApp, ctx: Option<&egui::Context>) -> Result<(
         || !app.forwarded.files.is_empty()
         || ctx.is_some_and(|ctx| {
             ctx.input(|input| {
-                input.events.iter().any(|event| !matches!(event, egui::Event::PointerMoved(_) | egui::Event::PointerGone))
-                    || !input.raw.dropped_files.is_empty()
+                input.events.iter().any(|event| {
+                    !matches!(event, egui::Event::PointerMoved(_) | egui::Event::MouseMoved(_) | egui::Event::PointerGone)
+                }) || !input.raw.dropped_files.is_empty()
                     || input.pointer.any_down()
             })
         });
@@ -231,7 +234,11 @@ mod provider_routing_tests {
         // Match the activity flag that the real UI phase records after a pointer-only frame.
         app.input_active = true;
         let pointer_only = egui::RawInput {
-            events: vec![egui::Event::PointerMoved(egui::pos2(10.0, 20.0)), egui::Event::PointerGone],
+            events: vec![
+                egui::Event::PointerMoved(egui::pos2(10.0, 20.0)),
+                egui::Event::MouseMoved(egui::vec2(1.0, 2.0)),
+                egui::Event::PointerGone,
+            ],
             ..Default::default()
         };
         let _ = ctx.run_ui(pointer_only, |ui| assert!(check_open(&app, Some(ui.ctx())).is_ok()));
@@ -244,5 +251,40 @@ mod provider_routing_tests {
         let mut raw = egui::RawInput::default();
         raw.events.push(egui::Event::Text("pending edit".into()));
         let _ = ctx.run_ui(raw, |ui| assert!(check_open(&app, Some(ui.ctx())).is_err()));
+    }
+
+    #[test]
+    fn focused_inline_draft_survives_an_event_empty_provider_delivery_frame() {
+        let app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        assert!(check_open(&app, Some(&ctx)).is_ok());
+        let project = app.session.project.clone();
+        let revision = app.session.revision;
+        let doc = document_id(&app);
+        let id = egui::Id::unique("provider-inline-draft");
+        let expected = "Uncommitted inline value";
+        let mut draft = String::new();
+        let editing = egui::RawInput { events: vec![egui::Event::Text(expected.into())], ..Default::default() };
+        let mut first = ctx.run_ui(editing, |ui| {
+            ui.memory_mut(|memory| memory.request_focus(id));
+            let field = ui.add(egui::TextEdit::singleline(&mut draft).id(id));
+            assert!(field.has_focus(), "a real TextEdit must own the draft");
+        });
+        first.textures_delta.clear();
+        assert_eq!(draft, expected);
+        let mut delivery = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(ui.input(|input| input.events.is_empty()), "delivery must have no fresh editing input");
+            assert!(app.dialog.is_none() && app.session.state.text_edit.is_none() && !app.session.is_dirty());
+            assert!(ui.ctx().text_edit_focused(), "focus must survive from the preceding widget frame");
+            assert!(check_open(&app, Some(ui.ctx())).is_err(), "refuse before replacing or staging anything");
+            assert_eq!(draft, expected);
+            assert!(std::sync::Arc::ptr_eq(&project, &app.session.project));
+            assert_eq!(app.session.revision, revision);
+            assert_eq!(document_id(&app), doc);
+            let field = ui.add(egui::TextEdit::singleline(&mut draft).id(id));
+            assert!(field.has_focus());
+        });
+        delivery.textures_delta.clear();
+        assert_eq!(draft, expected);
     }
 }
