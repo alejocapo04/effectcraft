@@ -645,11 +645,7 @@ mod tests {
         let connection = host.connect("test".into(), "Review files".into(), "example-account".into()).unwrap();
         host.set_resources(
             &connection,
-            vec![crate::file_providers::Resource {
-                id: "composition".into(),
-                name: "Provider composition.ecbundle".into(),
-                updated_at: String::new(),
-            }],
+            vec![crate::file_providers::Resource { id: "composition".into(), name: "Provider composition.ecbundle".into(), updated_at: String::new() }],
         )
         .unwrap();
         let ctx = egui::Context::default();
