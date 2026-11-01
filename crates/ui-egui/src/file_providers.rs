@@ -427,10 +427,17 @@ impl Host {
 
     /// Native Home/Open view, separate from paths belonging to this device.
     pub fn recent_ui(&self, ui: &mut egui::Ui) {
+        if self.recent_provider_ui(ui) {
+            ui.weak("Recent on this device");
+        }
+    }
+
+    /// Home supplies its own native device heading after this provider block and separator.
+    pub(crate) fn recent_provider_ui(&self, ui: &mut egui::Ui) -> bool {
         let (label, resources) = {
             let s = self.state();
             let Some(identity) = s.identity.as_ref().filter(|_| s.enabled) else {
-                return;
+                return false;
             };
             (identity.label.clone(), s.resources.clone())
         };
@@ -446,7 +453,7 @@ impl Host {
             }
         }
         ui.separator();
-        ui.weak("Recent on this device");
+        true
     }
 }
 

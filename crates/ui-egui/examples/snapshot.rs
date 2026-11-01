@@ -4,15 +4,16 @@
 //!
 //! ```text
 //! cargo run -p effectcraft-ui-egui --example snapshot -- [--out ui.png] [--size 1680x1020]
-//!     [--scale 2] [--settle 1.5] [--empty] [--file-provider-preview] [--script steps.jsonl | --step '<json>']...
+//!     [--scale 2] [--settle 1.5] [--empty] [--home-preview] [--file-provider-preview] [--script steps.jsonl | --step '<json>']...
 //! ```
 //!
 //! Each script step is a control-channel request (`{"method":"engine.execute","params":{...}}`,
 //! see `docs/control-protocol.md`), run in order with the app settling in between. The extra
 //! method `{"method":"snap","params":{"path":"x.png"}}` writes an intermediate snapshot.
 //! Replies are printed to stdout as JSON lines.
-//! The provider preview shows synthetic, separate device/provider Recents on the real Home
-//! screen. It is limited to this example and contacts no storage service.
+//! --home-preview shows Home with a synthetic device Recent and no provider. The provider
+//! preview implies that same Home state and adds separate synthetic provider Recents. Both
+//! flags are limited to this example and contact no storage service.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -27,12 +28,22 @@ struct Args {
     scale: f32,
     settle: f64,
     demo: bool,
+    home_preview: bool,
     provider_preview: bool,
     steps: Vec<Value>,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { out: "ui.png".into(), size: (1680.0, 1020.0), scale: 2.0, settle: 1.5, demo: true, provider_preview: false, steps: Vec::new() };
+    let mut a = Args {
+        out: "ui.png".into(),
+        size: (1680.0, 1020.0),
+        scale: 2.0,
+        settle: 1.5,
+        demo: true,
+        home_preview: false,
+        provider_preview: false,
+        steps: Vec::new(),
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = || it.next().ok_or_else(|| format!("{arg} needs a value"));
@@ -46,6 +57,7 @@ fn parse_args() -> Result<Args, String> {
             "--scale" => a.scale = val()?.parse().map_err(|_| "bad --scale")?,
             "--settle" => a.settle = val()?.parse().map_err(|_| "bad --settle")?,
             "--empty" => a.demo = false,
+            "--home-preview" => a.home_preview = true,
             "--file-provider-preview" => a.provider_preview = true,
             "--step" => a.steps.push(serde_json::from_str(&val()?).map_err(|e| format!("--step: {e}"))?),
             "--script" => {
@@ -56,7 +68,7 @@ fn parse_args() -> Result<Args, String> {
                 }
             }
             "-h" | "--help" => {
-                return Err("usage: snapshot [--out ui.png] [--size WxH] [--scale 2] [--settle secs] [--empty] [--file-provider-preview] [--script f.jsonl | --step json]...".into());
+                return Err("usage: snapshot [--out ui.png] [--size WxH] [--scale 2] [--settle secs] [--empty] [--home-preview] [--file-provider-preview] [--script f.jsonl | --step json]...".into());
             }
             _ => return Err(format!("unknown argument {arg}")),
         }
@@ -104,6 +116,10 @@ fn main() {
     }
     let (tx, rx) = mpsc::channel::<ControlRequest>();
     let mut app = EffectcraftApp::new(session).with_control(rx);
+    if args.home_preview || args.provider_preview {
+        app.ui.start_screen = true;
+        app.session.prefs.push_recent("Device composition.ecproj");
+    }
     if args.provider_preview {
         let host = &app.hooks.file_providers;
         let result = host.set_session("00112233445566778899aabbccddeeff".into()).and_then(|()| {
@@ -121,8 +137,6 @@ fn main() {
             eprintln!("provider preview: {error}");
             return;
         }
-        app.ui.start_screen = true;
-        app.session.prefs.push_recent("Device composition.ecproj");
     }
     let mut harness = Harness::builder().with_size(egui::vec2(args.size.0, args.size.1)).with_pixels_per_point(args.scale).wgpu().build_eframe(move |_cc| app);
     settle(&mut harness, args.settle);

@@ -75,3 +75,10 @@ and failure handling. This feature does not claim that an arbitrary host authent
 anything; those are responsibilities outside the editor.
 
 Contribution credit: @alejocapo04.
+
+## Native review previews
+
+Use the existing snapshot example with `--empty --home-preview` for a provider-free Home
+containing one synthetic device Recent. Add `--file-provider-preview` for the same Home with
+synthetic external Recents. Plain `--empty` keeps the example's original empty-editor behavior.
+These flags add no transport, storage service or authentication, and are off by default.

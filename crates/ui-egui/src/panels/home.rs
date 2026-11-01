@@ -389,7 +389,9 @@ fn home_page(
     if app.hooks.file_providers.enabled() {
         let r = Rect::from_min_size(pos2(x0, y), vec2(w, 160.0));
         ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
-            egui::ScrollArea::vertical().id_salt("file-provider-home").max_height(150.0).show(ui, |ui| crate::provider_ui::recent(app, ui));
+            egui::ScrollArea::vertical().id_salt("file-provider-home").max_height(150.0).show(ui, |ui| {
+                app.hooks.file_providers.recent_provider_ui(ui);
+            });
         });
         y += 170.0;
     }
@@ -623,6 +625,50 @@ mod tests {
         ] {
             assert!(app.auto.find(id).is_some(), "{id}");
         }
+    }
+
+    #[test]
+    fn provider_home_draws_each_recent_heading_once_and_keeps_the_device_list() {
+        fn text(shape: &egui::Shape, labels: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(shape) => labels.push(shape.galley.text().to_string()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| text(shape, labels)),
+                _ => {}
+            }
+        }
+        crate::i18n::set_current("en");
+        let mut session = effectcraft_engine::Session::default();
+        session.prefs.push_recent("Device composition.ecproj");
+        let mut app = EffectcraftApp::new(session);
+        let host = &app.hooks.file_providers;
+        host.set_session("0123456789abcdef0123456789abcdef".into()).unwrap();
+        let connection = host.connect("test".into(), "Review files".into(), "example-account".into()).unwrap();
+        host.set_resources(
+            &connection,
+            vec![crate::file_providers::Resource {
+                id: "composition".into(),
+                name: "Provider composition.ecbundle".into(),
+                updated_at: String::new(),
+            }],
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1440.0, 900.0));
+        let mut frame = ctx.run_ui(Default::default(), |ui| {
+            app.auto.begin_frame();
+            show(&mut app, ui, rect);
+        });
+        frame.textures_delta.clear();
+        let mut labels = Vec::new();
+        for shape in &frame.shapes {
+            text(&shape.shape, &mut labels);
+        }
+        assert_eq!(labels.iter().filter(|label| label.as_str() == "Recent on this device").count(), 1);
+        assert_eq!(labels.iter().filter(|label| label.as_str() == "Recent — Review files").count(), 1);
+        assert!(labels.iter().any(|label| label == "Provider composition.ecbundle"));
+        assert!(app.auto.find("home.recent.0").is_some());
     }
 
     #[test]
