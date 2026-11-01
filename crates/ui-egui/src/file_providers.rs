@@ -168,6 +168,7 @@ impl Host {
         s.connection.clear();
         s.enabled = false;
         s.resources.clear();
+        s.documents = Value::Null;
         s.bindings.clear();
         s.events.clear();
         Ok(())

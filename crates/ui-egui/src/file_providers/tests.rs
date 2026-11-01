@@ -17,6 +17,22 @@ fn capture(doc: u64, revision: u64) -> Capture {
 }
 
 #[test]
+fn disconnect_forgets_document_metadata_before_another_account_registers() {
+    let host = Host::default();
+    host.set_session("0123456789abcdef0123456789abcdef".into()).unwrap();
+    host.connect("test".into(), "Provider".into(), "account-a".into()).unwrap();
+    let documents = json!([{"id":"1","name":"Account A document","dirty":true}]);
+    host.publish_documents(documents.clone(), &[1]);
+    assert_eq!(host.snapshot()["documents"], documents);
+    host.disconnect().unwrap();
+    assert!(host.snapshot()["documents"].is_null());
+    host.connect("test".into(), "Provider".into(), "account-b".into()).unwrap();
+    let snapshot = host.snapshot();
+    assert_eq!(snapshot["namespace"], "account-b");
+    assert!(snapshot["documents"].is_null(), "the new account must not see metadata cached before its first UI tick");
+}
+
+#[test]
 fn disabled_until_explicit_registration() {
     let host = Host::default();
     assert!(!host.enabled());
