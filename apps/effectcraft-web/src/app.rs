@@ -132,7 +132,7 @@ impl eframe::App for WebApp {
             f(&mut self.app);
         }
         self.app.tick(ctx, frame);
-        self.providers.tick(&mut self.app);
+        self.providers.tick(&mut self.app, ctx);
         // eframe on the web ignores `ViewportCommand::Title`: the tab title follows the open document here.
         if self.app.window_title() != self.document_title {
             self.document_title = self.app.window_title().to_owned();

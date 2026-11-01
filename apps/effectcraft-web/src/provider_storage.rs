@@ -108,10 +108,8 @@ fn capture(session: &Session) -> Result<Vec<u8>, String> {
     Bundle { project, assets }.encode()
 }
 
-fn open(app: &mut EffectcraftApp, request: &str, bytes: &[u8]) -> Result<(), String> {
-    if app.session.is_dirty() || app.hooks.file_providers.pending_for(effectcraft_ui_egui::provider_ui::document_id(app)) {
-        return Err("Save the current project, or close it explicitly, before opening a provider project".into());
-    }
+fn open(app: &mut EffectcraftApp, request: &str, bytes: &[u8], ctx: Option<&egui::Context>) -> Result<(), String> {
+    effectcraft_ui_egui::provider_ui::check_open(app, ctx)?;
     let bundle = Bundle::decode(bytes)?;
     let text = std::str::from_utf8(&bundle.project).map_err(|e| e.to_string())?;
     let project = Project::from_json(text).map_err(|e| e.to_string())?;
@@ -156,7 +154,7 @@ fn open(app: &mut EffectcraftApp, request: &str, bytes: &[u8]) -> Result<(), Str
 }
 
 impl Runtime {
-    pub fn tick(&mut self, app: &mut EffectcraftApp) {
+    pub fn tick(&mut self, app: &mut EffectcraftApp, ctx: &egui::Context) {
         let host = app.hooks.file_providers.clone();
         for command in host.take_commands() {
             match command {
@@ -196,7 +194,7 @@ impl Runtime {
                         }
                     }
                 }
-                Command::Open { request, resource: _, name, bytes } => match open(app, &request, &bytes) {
+                Command::Open { request, resource: _, name, bytes } => match open(app, &request, &bytes, Some(ctx)) {
                     Ok(()) => host.opened(
                         &request,
                         Some(Capture { doc: effectcraft_ui_egui::provider_ui::document_id(app), revision: app.session.revision, name, save_as: false }),
@@ -217,5 +215,5 @@ impl Runtime {
 /// Reopen a downloaded complete bundle without binding it to a provider account.
 pub fn open_device(app: &mut EffectcraftApp, bytes: &[u8]) -> Result<(), String> {
     let root = format!("device-{:016x}-{:016x}", js_sys::Date::now().to_bits(), js_sys::Math::random().to_bits());
-    open(app, &root, bytes)
+    open(app, &root, bytes, None)
 }
