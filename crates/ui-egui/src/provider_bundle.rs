@@ -115,34 +115,79 @@ impl Bundle {
     }
 }
 
-/// Rebase media references and file properties without touching document text.
+/// Rebase only native footage references and properties explicitly presented as files.
 pub fn rewrite(value: &mut serde_json::Value, replacements: &BTreeMap<String, String>) {
-    match value {
-        serde_json::Value::String(s) => {
-            if let Some(p) = replacements.get(s) {
-                *s = p.clone();
+    if let Some(items) = value.get_mut("items").and_then(serde_json::Value::as_object_mut) {
+        for item in items.values_mut() {
+            if let Some(kind) = item.get_mut("kind")
+                && kind.get("type").and_then(serde_json::Value::as_str) == Some("Footage")
+            {
+                rewrite_footage(kind, replacements);
+            }
+            if let Some(footage) = item.get_mut("proxy").and_then(|proxy| proxy.get_mut("footage")) {
+                rewrite_footage(footage, replacements);
             }
         }
-        serde_json::Value::Array(a) => {
-            for v in a {
-                rewrite(v, replacements);
+    }
+    // Walk containers, not their string contents. A Str is also a valid text control, and a
+    // popup's options or saved-view strings are never media references merely by equality.
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::Object(object) => {
+                rewrite_property(object, replacements);
+                pending.extend(object.values_mut());
+            }
+            serde_json::Value::Array(array) => pending.extend(array.iter_mut()),
+            _ => {}
+        }
+    }
+}
+
+fn rewrite_property(object: &mut serde_json::Map<String, serde_json::Value>, replacements: &BTreeMap<String, String>) {
+    if object.get("ui").and_then(|ui| ui.get("kind")).and_then(serde_json::Value::as_str) != Some("File") {
+        return;
+    }
+    if let Some(value) = object.get_mut("value") {
+        rewrite_file_value(value, replacements);
+    }
+    if let Some(keys) = object.get_mut("keys").and_then(serde_json::Value::as_array_mut) {
+        for key in keys {
+            if let Some(value) = key.get_mut("value") {
+                rewrite_file_value(value, replacements);
             }
         }
-        serde_json::Value::Object(o) => {
-            if o.get("t").and_then(serde_json::Value::as_str) == Some("Str") {
-                if let Some(v) = o.get_mut("v") {
-                    rewrite(v, replacements);
-                }
-            }
-            for (key, v) in o.iter_mut() {
-                if matches!(key.as_str(), "path" | "sequence") {
-                    rewrite(v, replacements);
-                } else if v.is_object() || v.is_array() {
-                    rewrite(v, replacements);
-                }
-            }
+    }
+}
+
+fn rewrite_footage(value: &mut serde_json::Value, replacements: &BTreeMap<String, String>) {
+    // Embedded data footage does not refer to the browser media table.
+    if value.get("data").is_some_and(|data| !data.is_null()) {
+        return;
+    }
+    if let Some(path) = value.get_mut("path") {
+        rewrite_path(path, replacements);
+    }
+    if let Some(sequence) = value.get_mut("sequence").and_then(serde_json::Value::as_array_mut) {
+        for path in sequence {
+            rewrite_path(path, replacements);
         }
-        _ => {}
+    }
+}
+
+fn rewrite_file_value(value: &mut serde_json::Value, replacements: &BTreeMap<String, String>) {
+    if value.get("t").and_then(serde_json::Value::as_str) == Some("Str")
+        && let Some(path) = value.get_mut("v")
+    {
+        rewrite_path(path, replacements);
+    }
+}
+
+fn rewrite_path(value: &mut serde_json::Value, replacements: &BTreeMap<String, String>) {
+    if let serde_json::Value::String(path) = value
+        && let Some(staged) = replacements.get(path)
+    {
+        *path = staged.clone();
     }
 }
 
@@ -236,6 +281,73 @@ mod tests {
             assert!(Bundle::decode(&bytes[..n]).is_err());
         }
     }
+    #[test]
+    fn provider_media_rebase_preserves_native_text_and_only_changes_file_controls() {
+        use effectcraft_color::Label;
+        use effectcraft_project::{Comp, Footage, FootageKind, ItemKind, Keyframe, LayerSource, Node, ParamUi, Project, Property, Proxy, SavedView, Value};
+        use effectcraft_time::{FrameRate, Tick};
+        use std::sync::Arc;
+
+        let path = "/picked/image_0001.png";
+        let next = "/picked/image_0002.png";
+        let rate = FrameRate::FPS_25;
+        let footage = Footage {
+            path: path.into(),
+            kind: FootageKind::Sequence,
+            width: 1,
+            height: 1,
+            has_video: true,
+            frame_rate: rate,
+            duration: rate.tick_of(2),
+            sequence: vec![path.into(), next.into()],
+            ..Default::default()
+        };
+        let mut project = Project::default();
+        let media_id = project.add_item("Image sequence", Label::Blue, None, ItemKind::Footage(footage.clone()));
+        project.item_mut(media_id).unwrap().comment = path.into();
+        project.item_mut(media_id).unwrap().proxy = Some(Box::new(Proxy { footage, enabled: true }));
+        let mut comp = Comp::new(1, 1, rate, rate.tick_of(2));
+        let mut layer = effectcraft_project::build::layer(&mut project, &comp, "File and text controls", LayerSource::Footage { item: media_id }, (1, 1), None);
+        let mut text = Property::new(project.alloc(), "literal", "Literal text", Value::Str(path.into())).with_ui(ParamUi::Text);
+        text.keys.push(Keyframe::new(Tick::ZERO, Value::Str(next.into())));
+        let mut file = Property::new(project.alloc(), "file", "File", Value::Str(path.into())).with_ui(ParamUi::File { filters: vec!["png".into()] });
+        file.keys.push(Keyframe::new(Tick::ZERO, Value::Str(next.into())));
+        let options = Property::new(project.alloc(), "options", "Options", Value::Scalar(1.0)).with_ui(ParamUi::Popup { options: vec![path.into()] });
+        layer.props.children.extend([Node::Prop(text), Node::Prop(file), Node::Prop(options)]);
+        comp.layers.push(layer);
+        let comp_id = project.add_item("Composition", Label::Blue, None, ItemKind::Comp(Arc::new(comp)));
+        // The media is generated in this fixture, not a mislabeled or truncated placeholder file.
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([12, 34, 56, 255])))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = png.into_inner();
+        let bundle = Bundle {
+            project: project.to_file_json_with_view(&SavedView::default(), false).unwrap().into_bytes(),
+            assets: BTreeMap::from([(path.into(), bytes.clone()), (next.into(), bytes)]),
+        };
+        let decoded = Bundle::decode(&bundle.encode().unwrap()).unwrap();
+        let staged = stage_path("/__file_provider/open-text", path).unwrap();
+        let staged_next = stage_path("/__file_provider/open-text", next).unwrap();
+        let mut json: serde_json::Value = serde_json::from_slice(&decoded.project).unwrap();
+        rewrite(&mut json, &BTreeMap::from([(path.into(), staged.clone()), (next.into(), staged_next.clone())]));
+        let restored = Project::from_json(&serde_json::to_string(&json).unwrap()).unwrap();
+        let item = restored.item(media_id).unwrap();
+        let ItemKind::Footage(media) = &item.kind else { panic!("expected footage") };
+        assert_eq!(media.path, staged);
+        assert_eq!(media.sequence, vec![staged.clone(), staged_next.clone()]);
+        assert_eq!(item.proxy.as_ref().unwrap().footage.path, staged);
+        assert_eq!(item.comment, path);
+        let layer = restored.comp(comp_id).unwrap().layers.first().unwrap();
+        let property = |id: &str| layer.props.children.iter().filter_map(Node::as_prop).find(|p| p.match_id == id).unwrap();
+        assert_eq!(property("literal").value, Value::Str(path.into()));
+        assert_eq!(property("literal").keys.first().unwrap().value, Value::Str(next.into()));
+        assert_eq!(property("file").value, Value::Str(staged));
+        assert_eq!(property("file").keys.first().unwrap().value, Value::Str(staged_next));
+        assert_eq!(property("options").ui, ParamUi::Popup { options: vec![path.into()] });
+        assert_eq!(image::load_from_memory(decoded.assets.get(path).unwrap()).unwrap().width(), 1);
+    }
+
     #[test]
     fn staging_is_private_and_rejects_escape() {
         assert_eq!(stage_path("/__file_provider/page-1", "/files/a/../b.png").unwrap(), "/__file_provider/page-1/files/b.png");

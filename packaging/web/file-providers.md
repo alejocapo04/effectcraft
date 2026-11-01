@@ -58,6 +58,8 @@ Downloaded bundles can be reopened through the browser's project picker or drag/
 native project support does not require understanding the optional transport envelope.
 EffectCraft also packages supported glTF/OBJ material sidecars and File properties such as LUTs. External network URIs, parent-relative model sidecars, material-map options and externally linked OCIO/C4D/FBX formats fail closed until a lossless adapter exists.
 
+Rebasing is limited to native footage/proxy/sequence references and File property values/keyframes. Text controls (including Str values), popup options and other project/view strings remain unchanged even when their contents equal a media path.
+
 Each provider operation is bounded to **80 MiB**. Media/path metadata and decoded asset counts are
 bounded independently. Large projects fail before a save event; local/native workflows remain
 available. No cloud project is marked saved merely because serialization or a download completed.
