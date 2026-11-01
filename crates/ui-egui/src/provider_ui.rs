@@ -37,8 +37,9 @@ pub fn check_open(app: &EffectcraftApp, ctx: Option<&egui::Context>) -> Result<(
         || app.session.state.text_edit.is_some()
         || app.ui.fx_pick.is_some()
         || app.ui.text_color_pick.is_some();
-    let interaction = app.input_active
-        || app.last_pointer_down
+    // input_active is post-UI activity telemetry and includes already-consumed pointer motion.
+    // Admission depends on live editor ownership and potentially editing input still in this pass.
+    let interaction = app.last_pointer_down
         || app.ui.viewer.interacting
         || app.ui.viewer.property_interacting
         || app.session.key_move.is_some()
@@ -46,7 +47,13 @@ pub fn check_open(app: &EffectcraftApp, ctx: Option<&egui::Context>) -> Result<(
         || !app.synthetic.is_empty()
         || !app.forwarded.events.is_empty()
         || !app.forwarded.files.is_empty()
-        || ctx.is_some_and(|ctx| ctx.input(|input| !input.events.is_empty() || !input.raw.dropped_files.is_empty() || input.pointer.any_down()));
+        || ctx.is_some_and(|ctx| {
+            ctx.input(|input| {
+                input.events.iter().any(|event| !matches!(event, egui::Event::PointerMoved(_) | egui::Event::PointerGone))
+                    || !input.raw.dropped_files.is_empty()
+                    || input.pointer.any_down()
+            })
+        });
     let jobs = app.session.render_job.is_some()
         || app.session.track_job.is_some()
         || app.session.mask_job.is_some()
@@ -221,6 +228,16 @@ mod provider_routing_tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
         assert!(check_open(&app, Some(&ctx)).is_ok());
+        // Match the activity flag that the real UI phase records after a pointer-only frame.
+        app.input_active = true;
+        let pointer_only = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(egui::pos2(10.0, 20.0)), egui::Event::PointerGone],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(pointer_only, |ui| assert!(check_open(&app, Some(ui.ctx())).is_ok()));
+        app.last_pointer_down = true;
+        assert!(check_open(&app, Some(&ctx)).is_err());
+        app.last_pointer_down = false;
         app.ui.viewer.interacting = true;
         assert!(check_open(&app, Some(&ctx)).is_err());
         app.ui.viewer.interacting = false;

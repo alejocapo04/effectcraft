@@ -3,6 +3,8 @@
 //
 //   cargo xtask web --serve 8765 &            # build + serve <target>/web/dist
 //   node apps/effectcraft-web/tests/smoke.mjs --url http://127.0.0.1:8765/ --out /tmp/ec-web
+// Provider-only real callback regression, without the other smoke cases:
+//   node apps/effectcraft-web/tests/smoke.mjs --provider-open-boundary --url http://127.0.0.1:8765/?empty --out target/web/provider-open-boundary
 //
 // Steps: load (timing), the GPU path (WebGPU → GPU compositor, viewer frames on the GPU), demo
 // comp in the viewer (screenshot, viewer pixels), `render.frame` through `window.effectcraft`,
@@ -20,6 +22,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readdirSync, statSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { checkProviderOpenBoundary } from "./provider-open-boundary.mjs";
 
 const arg = (k, d) => {
   const i = process.argv.indexOf(`--${k}`);
@@ -30,11 +33,12 @@ const out = arg("out", join(tmpdir(), "effectcraft-web-smoke"));
 const chrome = arg("chrome", process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "google-chrome");
 const port = Number(arg("port", "9334"));
 const headless = !process.argv.includes("--headed");
+const providerOpenBoundary = process.argv.includes("--provider-open-boundary");
 mkdirSync(out, { recursive: true });
 const downloads = join(out, "downloads");
 mkdirSync(downloads, { recursive: true });
 
-const profile = mkdtempSync(join(tmpdir(), "ec-chrome-"));
+const profile = mkdtempSync(join(providerOpenBoundary ? out : tmpdir(), "ec-chrome-"));
 const proc = spawn(chrome, [
   ...(headless ? ["--headless=new"] : []),
   `--remote-debugging-port=${port}`,
@@ -148,6 +152,9 @@ try {
   report.load = await ready();
   report.load.wallMs = Date.now() - t0;
   report.info = await js("effectcraft.info()");
+  if (providerOpenBoundary) {
+    report.steps.providerOpenBoundary = await checkProviderOpenBoundary({ evaluate: js });
+  } else {
   // Storage: OPFS where the browser writes it (Chrome does), else IndexedDB.
   check(["opfs", "indexeddb"].includes(report.info.storage?.backend), `storage backend ${JSON.stringify(report.info.storage)}`);
 
@@ -577,6 +584,7 @@ try {
   check(info3.serviceWorker, "offline reload served by the service worker");
   check(info3.crossOriginIsolated, "cross-origin isolated under the service worker");
   report.steps.final2 = { screenshot: await shot("03-offline") };
+  }
 } catch (e) {
   failed = true;
   report.error = String(e?.stack || e);
