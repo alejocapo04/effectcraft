@@ -114,15 +114,7 @@ fn open(app: &mut EffectcraftApp, request: &str, bytes: &[u8], ctx: Option<&egui
     let text = std::str::from_utf8(&bundle.project).map_err(|e| e.to_string())?;
     let project = Project::from_json(text).map_err(|e| e.to_string())?;
     let mut value: Value = serde_json::from_slice(&bundle.project).map_err(|e| e.to_string())?;
-    let mut todo: Vec<String> = referenced(&project, &value).into_iter().collect();
-    let mut checked = BTreeSet::new();
-    while let Some(path) = todo.pop() {
-        if !checked.insert(path.clone()) {
-            continue;
-        }
-        let bytes = bundle.assets.get(&path).ok_or_else(|| format!("Provider bundle is missing {path}"))?;
-        todo.extend(provider_bundle::sidecars(&path, bytes)?);
-    }
+    bundle.validate_resources(referenced(&project, &value))?;
     let root = format!("/__file_provider/{request}");
     let mut replacements = BTreeMap::new();
     let mut staged = BTreeSet::new();
@@ -137,16 +129,22 @@ fn open(app: &mut EffectcraftApp, request: &str, bytes: &[u8], ctx: Option<&egui
     let text = serde_json::to_string(&value).map_err(|e| e.to_string())?;
     let project = Project::from_json(&text).map_err(|e| e.to_string())?;
     let view = effectcraft_engine::project::saved_view(&text);
+    let importer = app.session.importer.clone().ok_or("Provider media importer is unavailable")?;
+    // All fallible validation finishes before either the Store or live decoder is changed.
     for (path, bytes) in bundle.assets {
         if let Some(target) = replacements.get(&path) {
-            crate::files::put(target, bytes.into());
+            let bytes: Arc<[u8]> = bytes.into();
+            crate::files::put(target, bytes.clone());
+            importer.register(target, &bytes);
         }
     }
     app.session.replace_project(project, None);
     app.session.restore_view(&view);
     app.ui.start_screen = false;
+    let current_root = format!("{root}/");
     for (path, _) in crate::files::list() {
-        if path.starts_with("/__file_provider/") && !path.starts_with(&format!("{root}/")) {
+        if path.starts_with("/__file_provider/") && !path.starts_with(&current_root) {
+            importer.unregister(&path);
             crate::files::STORE.remove_file(&path);
         }
     }

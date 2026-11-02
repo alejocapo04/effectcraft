@@ -113,6 +113,21 @@ impl Bundle {
         }
         Ok(Self { project, assets })
     }
+
+    /// Verify the native project's referenced files and their transitive model dependencies
+    /// before a frontend changes its project, virtual files or decoder state.
+    pub fn validate_resources(&self, paths: impl IntoIterator<Item = String>) -> Result<(), String> {
+        let mut todo: Vec<String> = paths.into_iter().collect();
+        let mut checked = BTreeSet::new();
+        while let Some(path) = todo.pop() {
+            if !checked.insert(path.clone()) {
+                continue;
+            }
+            let bytes = self.assets.get(&path).ok_or_else(|| format!("Provider bundle is missing {path}"))?;
+            todo.extend(sidecars(&path, bytes)?);
+        }
+        Ok(())
+    }
 }
 
 /// Rebase only native footage references and properties explicitly presented as files.
@@ -216,7 +231,107 @@ pub fn stage_path(root: &str, path: &str) -> Result<String, String> {
     Ok(format!("{root}/{}", parts.join("/")))
 }
 
-/// Expand textual 3D/LUT sidecars without asking the provider to interpret project data.
+/// The JSON chunk of a bounded GLB v2 container, as read by the native model loader. Other
+/// chunk types are skipped, never decoded or allocated. Invalid lengths fail before staging.
+/// Container rules: Khronos glTF 2.0.1, section 4.4.3 (JSON/BIN order and four-byte alignment).
+fn glb_json(bytes: &[u8]) -> Result<&[u8], String> {
+    fn word(bytes: &[u8], at: usize) -> Result<u32, String> {
+        let end = at.checked_add(4).ok_or("invalid GLB chunk offset")?;
+        let value: [u8; 4] = bytes.get(at..end).ok_or("truncated GLB header")?.try_into().map_err(|_| "invalid GLB header")?;
+        Ok(u32::from_le_bytes(value))
+    }
+    if bytes.len() > MAX_BYTES || !bytes.starts_with(b"glTF") || word(bytes, 4)? != 2 {
+        return Err("invalid or unsupported GLB container".into());
+    }
+    let total = word(bytes, 8)? as usize;
+    if total != bytes.len() || total < 12 {
+        return Err("invalid GLB container length".into());
+    }
+    let mut at = 12usize;
+    let mut chunks = 0usize;
+    let mut json = None;
+    while at < total {
+        chunks += 1;
+        if chunks > MAX_FILES {
+            return Err("too many GLB chunks".into());
+        }
+        let len = word(bytes, at)? as usize;
+        let kind = word(bytes, at.checked_add(4).ok_or("invalid GLB chunk offset")?)?;
+        let start = at.checked_add(8).ok_or("invalid GLB chunk offset")?;
+        let end = start.checked_add(len).ok_or("invalid GLB chunk length")?;
+        let chunk = bytes.get(start..end).ok_or("GLB chunk runs past the end of the file")?;
+        if !len.is_multiple_of(4) {
+            return Err("GLB chunks must have four-byte alignment".into());
+        }
+        if kind == 0x4e4f_534a {
+            if chunks != 1 || json.is_some() {
+                return Err("GLB must start with exactly one JSON chunk".into());
+            }
+            json = Some(chunk);
+        } else if kind == 0x004e_4942 && chunks != 2 {
+            return Err("GLB BIN chunk must appear once, immediately after JSON".into());
+        }
+        at = end;
+    }
+    json.ok_or_else(|| "GLB without a JSON chunk".into())
+}
+
+/// Match the native model loader's percent-decoded relative filenames, then apply the same
+/// local-only path policy to the decoded name (encoded traversal is not an escape hatch).
+fn model_uri(uri: &str) -> Result<String, String> {
+    if uri.len() > 4096 {
+        return Err("external model resource URI exceeds its limit".into());
+    }
+    let mut input = uri.as_bytes();
+    let mut decoded = Vec::with_capacity(input.len());
+    while let Some((&byte, rest)) = input.split_first() {
+        if byte == b'%'
+            && let Some(hex) = rest.get(..2)
+            && hex.iter().all(u8::is_ascii_hexdigit)
+            && let Ok(text) = std::str::from_utf8(hex)
+            && let Ok(value) = u8::from_str_radix(text, 16)
+        {
+            decoded.push(value);
+            input = rest.get(2..).ok_or("invalid model resource URI")?;
+            continue;
+        }
+        decoded.push(byte);
+        input = rest;
+    }
+    let path = String::from_utf8_lossy(&decoded).into_owned();
+    if !valid_path(&path) {
+        return Err("invalid external model resource URI".into());
+    }
+    Ok(path)
+}
+
+fn collect_gltf_sidecars(json: &[u8], join: &impl Fn(&str) -> Result<String, String>) -> Result<BTreeSet<String>, String> {
+    let mut out = BTreeSet::new();
+    let value: serde_json::Value = serde_json::from_slice(json).map_err(|e| format!("invalid glTF sidecars: {e}"))?;
+    for key in ["buffers", "images"] {
+        for v in value.get(key).and_then(serde_json::Value::as_array).into_iter().flatten() {
+            if let Some(uri) = v.get("uri").and_then(serde_json::Value::as_str) {
+                if uri.starts_with("data:") {
+                    continue;
+                }
+                let decoded = model_uri(uri)?;
+                if decoded.starts_with("data:") {
+                    return Err("encoded model resource scheme is unsupported".into());
+                }
+                let p = join(&decoded)?;
+                if !p.is_empty() {
+                    out.insert(p);
+                    if out.len() > MAX_FILES {
+                        return Err("too many model sidecars".into());
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Expand supported 3D/LUT sidecars without asking the provider to interpret project data.
 /// Unknown sidecar formats fail closed instead of silently producing broken saved projects.
 pub fn sidecars(path: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
@@ -228,21 +343,19 @@ pub fn sidecars(path: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
         if p.contains("://") || p.starts_with('/') || p.contains('\\') || p.contains('?') || p.contains('#') || p.split('/').any(|segment| segment == "..") {
             return Err("external model resource URI is unsupported".into());
         }
-        Ok(if parent.is_empty() { p.into() } else { format!("{parent}/{p}") })
+        let relative = p.split('/').filter(|part| !matches!(*part, "" | ".")).collect::<Vec<_>>().join("/");
+        if relative.is_empty() {
+            return Err("empty external model resource path".into());
+        }
+        Ok(if parent.is_empty() { relative } else { format!("{parent}/{relative}") })
     };
     let mut out = BTreeSet::new();
-    if ext == "gltf" {
-        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("invalid glTF sidecars: {e}"))?;
-        for key in ["buffers", "images"] {
-            for v in value.get(key).and_then(serde_json::Value::as_array).into_iter().flatten() {
-                if let Some(uri) = v.get("uri").and_then(serde_json::Value::as_str) {
-                    let p = join(uri)?;
-                    if !p.is_empty() {
-                        out.insert(p);
-                    }
-                }
-            }
+    if matches!(ext.as_str(), "gltf" | "glb") {
+        if bytes.len() > MAX_BYTES {
+            return Err("model exceeds the provider media limit".into());
         }
+        let json = if ext == "glb" { glb_json(bytes)? } else { bytes };
+        out = collect_gltf_sidecars(json, &join)?;
     } else if matches!(ext.as_str(), "obj" | "mtl") {
         let text = std::str::from_utf8(bytes).map_err(|_| "3D sidecar is not UTF-8")?;
         for line in text.lines() {
@@ -268,6 +381,20 @@ pub fn sidecars(path: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn glb(json: &[u8]) -> Vec<u8> {
+        let mut json = json.to_vec();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let mut bytes = b"glTF".to_vec();
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&((20 + json.len()) as u32).to_le_bytes());
+        bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0x4e4f_534au32.to_le_bytes());
+        bytes.extend_from_slice(&json);
+        bytes
+    }
     #[test]
     fn project_and_media_round_trip_and_corruption_is_rejected() {
         let b = Bundle { project: br#"{"native":true}"#.to_vec(), assets: BTreeMap::from([("/picked/movie.bin".into(), vec![1, 0, 255, 7])]) };
@@ -360,5 +487,83 @@ mod tests {
             vec!["/files/scene/mesh.bin", "/files/scene/textures/albedo.png"]
         );
         assert!(sidecars("/files/a.gltf", br#"{"images":[{"uri":"https://example.invalid/image"}]}"#).is_err());
+    }
+
+    #[test]
+    fn glb_external_buffers_and_images_are_collected_with_native_uri_decoding() {
+        let json = br#"{"asset":{"version":"2.0"},"buffers":[{"uri":"./mesh.bin","byteLength":12}],"images":[{"uri":"textures/./albedo%20map.png"},{"uri":"data:image/png;base64,AA=="}]}"#;
+        let expected = vec!["/files/scene/mesh.bin", "/files/scene/textures/albedo map.png"];
+        assert_eq!(sidecars("/files/scene/model.glb", &glb(json)).unwrap(), expected);
+        assert_eq!(sidecars("/files/scene/model.gltf", json).unwrap(), expected);
+        assert!(sidecars("/files/scene/model.glb", &glb(br#"{"images":[{"uri":"%2e%2e/secret.png"}]}"#)).is_err());
+        assert!(sidecars("/files/scene/model.glb", &glb(br#"{"images":[{"uri":"https://example.invalid/texture.png"}]}"#)).is_err());
+        assert!(sidecars("/files/scene/model.glb", &glb(br#"{"images":[{"uri":"data%3Aexternal.png"}]}"#)).is_err());
+        let mut embedded = glb(br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":4}]}"#);
+        embedded.extend_from_slice(&4u32.to_le_bytes());
+        embedded.extend_from_slice(&0x004e_4942u32.to_le_bytes());
+        embedded.extend_from_slice(&[1, 2, 3, 4]);
+        let length = embedded.len() as u32;
+        embedded[8..12].copy_from_slice(&length.to_le_bytes());
+        assert!(sidecars("/files/scene/embedded.glb", &embedded).unwrap().is_empty());
+    }
+
+    #[test]
+    fn glb_missing_sidecars_fail_the_same_preflight_used_by_provider_open() {
+        let path = "/files/scene/model.glb";
+        let model = glb(br#"{"asset":{"version":"2.0"},"buffers":[{"uri":"mesh.bin","byteLength":4}],"images":[{"uri":"albedo.png"}]}"#);
+        let mut bundle = Bundle { project: b"{}".to_vec(), assets: BTreeMap::from([(path.into(), model)]) };
+        let validate = |bundle: &Bundle| bundle.validate_resources([path.to_string()]);
+        assert!(validate(&bundle).unwrap_err().contains("missing /files/scene/mesh.bin"));
+        bundle.assets.insert("/files/scene/mesh.bin".into(), vec![1, 2, 3, 4]);
+        assert!(validate(&bundle).unwrap_err().contains("missing /files/scene/albedo.png"));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([17, 39, 81, 255])))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        bundle.assets.insert("/files/scene/albedo.png".into(), png.into_inner());
+        let restored = Bundle::decode(&bundle.encode().unwrap()).unwrap();
+        validate(&restored).unwrap();
+        assert_eq!(restored, bundle, "all external resource bytes survive the envelope");
+        let root = "/__file_provider/glb-roundtrip";
+        assert_eq!(stage_path(root, path).unwrap(), format!("{root}/files/scene/model.glb"));
+        for sidecar in sidecars(path, restored.assets.get(path).unwrap()).unwrap() {
+            assert!(stage_path(root, &sidecar).unwrap().starts_with(&format!("{root}/files/scene/")));
+        }
+    }
+
+    #[test]
+    fn malformed_glb_chunks_fail_before_dependency_restoration() {
+        let bytes = glb(br#"{"asset":{"version":"2.0"}}"#);
+        for end in 0..bytes.len() {
+            assert!(sidecars("/files/truncated.glb", &bytes[..end]).is_err(), "accepted prefix {end}");
+        }
+        let mut oversized_chunk = bytes.clone();
+        oversized_chunk[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(sidecars("/files/oversized.glb", &oversized_chunk).is_err());
+        let mut wrong_version = bytes.clone();
+        wrong_version[4..8].copy_from_slice(&1u32.to_le_bytes());
+        assert!(sidecars("/files/version.glb", &wrong_version).is_err());
+        let mut no_json = bytes.clone();
+        no_json[16..20].copy_from_slice(&0x004e_4942u32.to_le_bytes());
+        assert!(sidecars("/files/no-json.glb", &no_json).is_err());
+        let mut duplicate = bytes.clone();
+        duplicate.extend_from_slice(&bytes[12..]);
+        let length = duplicate.len() as u32;
+        duplicate[8..12].copy_from_slice(&length.to_le_bytes());
+        let mut unaligned = bytes.clone();
+        unaligned.push(b' ');
+        let length = unaligned.len() as u32;
+        unaligned[8..12].copy_from_slice(&length.to_le_bytes());
+        unaligned[12..16].copy_from_slice(&(length - 20).to_le_bytes());
+        let mut bin_first = bytes[..12].to_vec();
+        bin_first.extend_from_slice(&4u32.to_le_bytes());
+        bin_first.extend_from_slice(&0x004e_4942u32.to_le_bytes());
+        bin_first.extend_from_slice(&[0; 4]);
+        bin_first.extend_from_slice(&bytes[12..]);
+        let length = bin_first.len() as u32;
+        bin_first[8..12].copy_from_slice(&length.to_le_bytes());
+        for malformed in [duplicate, unaligned, bin_first] {
+            assert!(sidecars("/files/layout.glb", &malformed).is_err(), "invalid GLB chunk layout was accepted");
+        }
     }
 }

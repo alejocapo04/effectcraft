@@ -387,6 +387,13 @@ impl MediaPool {
         self.forget(path);
     }
 
+    /// Retire exactly one file supplied by [`Self::add_bytes`], releasing its encoded bytes and
+    /// decoded caches. This never removes a filesystem file or another path sharing its prefix.
+    pub fn remove_bytes(&self, path: &str) {
+        lock(&self.inner.files).remove(path);
+        self.forget(path);
+    }
+
     /// Decode (or fetch from cache) the frame of `footage` at source time `t`.
     pub fn frame_at(&self, footage: &Footage, t: Tick) -> Result<Arc<Image>> {
         Inner::frame_at(&self.inner, footage, t, true, None, FloatCurve::Srgb)
@@ -1011,6 +1018,83 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_memory_media_registration_and_retirement_decode_only_current_paths() {
+        // Original, generated media: the live decoder must see new provider paths without a
+        // reload, and retiring an old root must release encoded bytes as well as frame caches.
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([12, 34, 56, 255])))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let bytes: Arc<[u8]> = png.into_inner().into();
+        let retired = Arc::downgrade(&bytes);
+        let old = "/__file_provider/native-fixture-1/image.png";
+        let current = "/__file_provider/native-fixture-10/image.png";
+        let local = "/picked/keep-local.png";
+        let pool = MediaPool::new();
+        pool.add_bytes(old, bytes.clone());
+        pool.add_bytes(current, bytes.to_vec().into());
+        pool.add_bytes(local, bytes.to_vec().into());
+        let footage = |path: &str| Footage { path: path.into(), kind: FootageKind::Still, width: 1, height: 1, has_video: true, ..Default::default() };
+        let pixel = pool.frame_at(&footage(old), Tick::ZERO).unwrap().get(0, 0);
+        for (actual, expected) in pixel.into_iter().zip([12.0 / 255.0, 34.0 / 255.0, 56.0 / 255.0, 1.0]) {
+            assert!((actual - expected).abs() < 1e-6, "decoded pixel {pixel:?}");
+        }
+        drop(bytes);
+        pool.remove_bytes(old);
+        assert!(retired.upgrade().is_none(), "obsolete encoded media is released");
+        assert!(!lock(&pool.inner.files).contains_key(old));
+        assert!(pool.frame_at(&footage(old), Tick::ZERO).is_err(), "the retired decoder/cache cannot serve stale pixels");
+        for path in [current, local] {
+            assert_eq!(pool.frame_at(&footage(path), Tick::ZERO).unwrap().get(0, 0), pixel, "retiring one path must preserve {path}");
+        }
+        pool.remove_bytes(old); // Exact removal is idempotent and never removes sibling roots.
+        assert!(lock(&pool.inner.files).contains_key(current));
+        assert!(lock(&pool.inner.files).contains_key(local));
+    }
+
+    #[test]
+    fn glb_models_decode_external_geometry_and_texture_from_registered_media() {
+        let root = "/__file_provider/native-glb/scene";
+        let path = format!("{root}/model.glb");
+        let mut json = br#"{"asset":{"version":"2.0"},"buffers":[{"uri":"mesh.bin","byteLength":36}],"bufferViews":[{"buffer":0,"byteLength":36}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"material":0}]}],"nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0,"images":[{"uri":"albedo%20map.png"}],"textures":[{"source":0}],"materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}}]}"#.to_vec();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let mut glb = b"glTF".to_vec();
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&((20 + json.len()) as u32).to_le_bytes());
+        glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4e4f_534au32.to_le_bytes());
+        glb.extend_from_slice(&json);
+        let geometry: Vec<u8> = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0].into_iter().flat_map(f32::to_le_bytes).collect();
+        let mut texture = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([19, 73, 151, 255])))
+            .write_to(&mut texture, image::ImageFormat::Png)
+            .unwrap();
+        let pool = MediaPool::new();
+        pool.add_bytes(&path, glb.into());
+        pool.add_bytes(&format!("{root}/mesh.bin"), geometry.into());
+        pool.add_bytes(&format!("{root}/albedo map.png"), texture.into_inner().into());
+        let footage = Footage { path: path.clone(), kind: FootageKind::Model, ..Default::default() };
+        let model = pool.model(ItemId(1), &footage).unwrap();
+        assert_eq!(model.meshes.len(), 1, "external geometry was parsed");
+        let reference = model.materials.first().unwrap().base_color_tex.unwrap();
+        let texture = model.textures.get(reference.texture).unwrap();
+        assert_eq!((texture.width, texture.height), (1, 1));
+        let pixel = texture.data.first().unwrap();
+        for (actual, expected) in pixel.iter().zip([19.0 / 255.0, 73.0 / 255.0, 151.0 / 255.0, 1.0]) {
+            assert!((*actual - expected).abs() < 1e-6, "external texture pixel {pixel:?}");
+        }
+        // Negative controls prove these results came from the registered external files.
+        pool.remove_bytes(&format!("{root}/albedo map.png"));
+        pool.forget(&path);
+        assert!(pool.model(ItemId(1), &footage).unwrap().textures.is_empty());
+        pool.remove_bytes(&format!("{root}/mesh.bin"));
+        pool.forget(&path);
+        assert!(pool.model(ItemId(1), &footage).is_none());
+    }
 
     /// Conforming a long file's audio reads every chunk at its own time: the sample index times
     /// ticks per second overflowed `i64` past 12:36 at 48 kHz, and later chunks came out silent

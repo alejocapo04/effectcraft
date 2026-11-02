@@ -4,7 +4,7 @@
 //   cargo xtask web --serve 8765 &            # build + serve <target>/web/dist
 //   node apps/effectcraft-web/tests/smoke.mjs --url http://127.0.0.1:8765/ --out /tmp/ec-web
 // Provider-only real callback regression, without the other smoke cases:
-//   node apps/effectcraft-web/tests/smoke.mjs --provider-open-boundary --url http://127.0.0.1:8765/?empty --out target/web/provider-open-boundary
+//   node apps/effectcraft-web/tests/smoke.mjs --provider-open-boundary --url 'http://127.0.0.1:8765/?empty&noworkers' --out target/web/provider-open-boundary
 //
 // Steps: load (timing), the GPU path (WebGPU → GPU compositor, viewer frames on the GPU), demo
 // comp in the viewer (screenshot, viewer pixels), `render.frame` through `window.effectcraft`,

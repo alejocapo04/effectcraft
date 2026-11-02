@@ -1,5 +1,5 @@
 // Real browser/WASM regression, composed by smoke.mjs --provider-open-boundary.
-// Requires the existing built app, Node >=22/CDP runner and a fresh browser profile.
+// Requires the existing built app, Node >=22/CDP runner and a fresh ?empty&noworkers page.
 // No transport-format mock: B is captured by the real provider save and the EXACT bytes
 // reach public openResource twice (dialog rejection, then successful idle decoding/staging).
 // Effect's private draft/live-preview fields are not exposed: its checkpoint is checked
@@ -38,8 +38,35 @@ async function pageBoundary({ appName, timeoutMs }) {
     return Array.from(hash, value => value.toString(16).padStart(2, "0")).join("");
   };
   const settleFrames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const decodedFrame = async () => {
+    // This production control request calls Session::render_rgba8_alpha with the page's live
+    // MediaPool. File-table equality alone cannot establish that a restored asset decodes.
+    const frame = await app.request("render.frame", { time: 0, max_side: 32, base64: true, write: false, transparent: true });
+    check(frame.width === 32 && frame.height === 16 && typeof frame.png === "string" && frame.png.length < 65536, "unexpected rendered fixture frame");
+    const png = Uint8Array.from(atob(frame.png), value => value.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = 32; canvas.height = 16;
+      const context = canvas.getContext("2d");
+      check(context, "could not inspect decoded composition pixels");
+      context.drawImage(bitmap, 0, 0);
+      const center = Array.from(context.getImageData(16, 8, 1, 1).data);
+      const corner = Array.from(context.getImageData(0, 0, 1, 1).data);
+      check(center.every((value, index) => Math.abs(value - [35, 121, 185, 255][index]) <= 2), "live page decoder lost media pixels: " + center);
+      check(corner[3] === 0, "fixture must retain transparent space outside its footage layer");
+      return { center, corner, pngSha256: await digest(png) };
+    } finally {
+      bitmap.close();
+    }
+  };
   const listener = ({ detail }) => events.push({ ...detail, bytes: detail.bytes ? new Uint8Array(detail.bytes) : undefined });
   check(app && provider && !provider.snapshot().connected, "requires a fresh app without another registered host");
+  if (!film) {
+    const query = new URLSearchParams(location.search);
+    check(query.has("noworkers") || query.get("frameworkers") === "0", "media restore regression requires ?noworkers or ?frameworkers=0");
+    await wait(() => app.info().frameWorkers?.workers === 0, "frame workers must not mask the page MediaPool regression");
+  }
   window.addEventListener(appName + "-file-provider", listener);
   const menu = id => app.request("ui.menu.invoke", { id });
   const current = () => provider.snapshot().documents?.[0];
@@ -109,13 +136,18 @@ async function pageBoundary({ appName, timeoutMs }) {
     check(blob && blob.size > 0, "synthetic media is empty");
     const image = new File([blob], "provider-boundary.png", { type: "image/png" });
     const imageSha256 = await digest(new Uint8Array(await image.arrayBuffer()));
+    let imagePath;
+    let originalDecodedFrame;
     if (film) {
       const imported = await app.importFiles([image]);
       check(imported.items?.length === 1 && !imported.errors?.length, "synthetic media import failed");
     } else {
-      await app.addFile(image);
+      imagePath = await app.addFile(image);
       // addFile posts open_or_import before this control request is drained.
       await app.inspect();
+      const imported = await app.execute("file.import", { paths: [imagePath], addToComp: true });
+      check(imported.items?.length === 1 && !imported.errors?.length, "could not add real fixture footage to B's composition");
+      originalDecodedFrame = await decodedFrame();
     }
     const bundle = await capture("B", "b");
     const bundleSha256 = await digest(bundle);
@@ -164,11 +196,31 @@ async function pageBoundary({ appName, timeoutMs }) {
     await boundResource("b");
     const staged = (await table()).filter(file => file.path.startsWith("/__file_provider/" + acceptedRequest + "/"));
     check(staged.some(file => file.path.endsWith("/provider-boundary.png") && file.sha256 === imageSha256), "idle success did not restore B's actual distinguishable media");
+    let restoredDecodedFrame;
+    let reopenedRequest;
+    let reopenedDecodedFrame;
+    if (!film) {
+      restoredDecodedFrame = await decodedFrame();
+      same(originalDecodedFrame, restoredDecodedFrame, "provider-restored composition pixels/PNG");
+      // A second complete open retires only the old private staging root. The original local
+      // asset stays available, while the new private path must decode without a page reload.
+      reopenedRequest = provider.requestOpen("b");
+      provider.openResource(reopenedRequest, "B." + bundleExtension, bundle);
+      await event("opened", reopenedRequest);
+      await clean();
+      reopenedDecodedFrame = await decodedFrame();
+      same(originalDecodedFrame, reopenedDecodedFrame, "second provider-restored composition pixels/PNG");
+      const files = await table();
+      check(!files.some(file => file.path.startsWith("/__file_provider/" + acceptedRequest + "/")), "obsolete provider file-table root was retained");
+      check(files.some(file => file.path.startsWith("/__file_provider/" + reopenedRequest + "/") && file.sha256 === imageSha256), "current provider media was removed with the old root");
+      check(await digest(await app.readFile(imagePath)) === imageSha256, "provider cleanup removed unrelated local media");
+    }
     check(await digest(bundle) === bundleSha256, "the rejected/accepted bundle bytes were changed");
     return {
       ok: true, boundary: "public openResource -> production WASM tick/open/decode/staging",
       rejectedRequest, acceptedRequest, bundleBytes: bundle.length, bundleSha256,
       guardError: failure.error, mediaTableBeforeEntries: before.files.length, stagedBMedia: staged,
+      originalDecodedFrame, restoredDecodedFrame, reopenedRequest, reopenedDecodedFrame,
       draftAssertion: film ? "actual serialized Sequence Settings draft equality" : "dialog persists and real Cancel preserves A checkpoint; private draft/live struct equality unobserved"
     };
   } finally {

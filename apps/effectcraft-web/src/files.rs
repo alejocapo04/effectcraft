@@ -171,6 +171,9 @@ impl effectcraft_engine::Importer for WebImporter {
     fn register(&self, path: &str, data: &[u8]) {
         self.pool.add_bytes(path, get(path).unwrap_or_else(|| data.into()));
     }
+    fn unregister(&self, path: &str) {
+        self.pool.remove_bytes(path);
+    }
     fn add_frames(&self, paths: &[String]) {
         for p in paths {
             if let Some(bytes) = get(p) {

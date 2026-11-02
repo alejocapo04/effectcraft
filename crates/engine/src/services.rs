@@ -78,6 +78,9 @@ pub trait Importer: Send + Sync {
     /// A footage file's bytes are now at `path` (extracted from a template): hosts whose media
     /// layer reads from memory (the browser) register them; file-based ones need nothing.
     fn register(&self, _path: &str, _data: &[u8]) {}
+    /// Retire one exact in-memory file owned by the frontend (for example an obsolete provider
+    /// staging path), including its encoded bytes and decoded caches. Local files are untouched.
+    fn unregister(&self, _path: &str) {}
     /// An image sequence's other frames (its first was probed) are footage now: hosts whose
     /// media layer reads from memory (the browser) register them; file-based ones need nothing.
     fn add_frames(&self, _paths: &[String]) {}

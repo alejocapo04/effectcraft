@@ -78,6 +78,8 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
 
 ## Code-drawn assets (original work, MIT OR Apache-2.0)
 
+- Provider media regression fixtures: original generated solid-color PNGs and a GLB triangle with external geometry/texture, created by @alejocapo04 under MIT OR Apache-2.0 in `crates/media/src/pool.rs`, `crates/ui-egui/src/provider_bundle.rs` and `apps/effectcraft-web/tests/provider-open-boundary.mjs`; no external artwork or binary fixture files.
+
 - UI icons drawn in code: `crates/ui-egui/src/icons.rs`, including the original filled favorite star (2026-10-11, EffectCraft contributors).
 - Procedural demo content (solids, shapes, gradients, text animations): `crates/engine/src/demo.rs`.
 - Built-in project templates (Lower Third, Title Card, Logo Reveal, Kinetic Type, Social Square, Vertical Story,

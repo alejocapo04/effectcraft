@@ -64,7 +64,22 @@ corruption; this format is not an authentication mechanism. Media paths are reba
 private browser-table root on each open; they never become OS paths or provider resource IDs.
 Downloaded bundles can be reopened through the browser's project picker or drag/drop. Desktop
 native project support does not require understanding the optional transport envelope.
-EffectCraft also packages supported glTF/OBJ material sidecars and File properties such as LUTs. External network URIs, parent-relative model sidecars, material-map options and externally linked OCIO/C4D/FBX formats fail closed until a lossless adapter exists.
+EffectCraft also packages supported glTF/GLB/OBJ material sidecars and File properties such as LUTs.
+GLB v2 JSON chunks are inspected without decoding or copying their binary chunks. Container layout
+follows [glTF 2.0.1, section 4.4.3](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#chunks):
+a single leading JSON chunk, an optional second BIN chunk and four-byte chunk alignment; unknown
+chunks are skipped. External buffer
+and image URIs use the same relative-path policy as textual glTF, including native-loader percent
+decoding before path checks. Models stay within the 80 MiB envelope limit, with at most 10,000 GLB
+chunks and 10,000 distinct model dependencies. Embedded data URIs remain inside the model. Malformed/truncated GLB
+containers, external network URIs, parent-relative model sidecars, material-map options and externally
+linked OCIO/C4D/FBX formats fail closed until a lossless adapter exists. Missing transitive resources
+are rejected before the current project, browser files or media decoder is changed.
+
+Successful open registers every staged asset with the live page media decoder before emitting
+`opened`, including when frame workers are disabled. A later provider open retires old private-root
+files from both browser storage and the page decoder's encoded-byte/decoded caches. Cleanup uses
+exact old staging paths and leaves the current root and unrelated local assets untouched.
 
 Rebasing is limited to native footage/proxy/sequence references and File property values/keyframes. Text controls (including Str values), popup options and other project/view strings remain unchanged even when their contents equal a media path.
 
@@ -81,6 +96,20 @@ state. Run the normal repository unit/format/clippy/web-build checks before revi
 host also needs browser integration tests for its authenticated persistence, dialog, media recovery
 and failure handling. This feature does not claim that an arbitrary host authenticated or persisted
 anything; those are responsibilities outside the editor.
+
+The existing real-browser boundary regression also checks production `render.frame` pixels before
+capture and after two provider opens on a fresh page with workers disabled. It verifies old staging
+root cleanup and preservation of the original local image, in addition to its live-dialog rejection,
+Cancel and resource-binding assertions. After building the current web app, run:
+
+```sh
+node apps/effectcraft-web/tests/smoke.mjs --provider-open-boundary --url 'http://127.0.0.1:8765/?empty&noworkers' --out target/web/provider-open-boundary
+```
+
+Native regressions exercise real PNG decoding and exact-path retirement in MediaPool, GLB external
+buffer/image discovery, the production missing-sidecar preflight and malformed chunk rejection.
+These source fixtures require execution under the normal gates. They do not establish browser or
+host persistence behavior until the corresponding current-source run has completed.
 
 Contribution credit: @alejocapo04.
 
